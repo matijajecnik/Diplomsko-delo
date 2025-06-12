@@ -11,14 +11,12 @@ from utils.data_loader import load_adult_test, process_test_data
 from utils.data_loader import load_ensemble_models, save_ensemble_models
 from utils.split_data import load_split_data
 
-def unlearn_from_split(split_index, percentage_to_unlearn=10, random_seed=42):
+def unlearn_from_split(split_index):
     """
-    Unlearn a percentage of data from a specific split and retrain the model
+    Unlearn pre-selected data from a specific split and retrain the model
     
     Parameters:
     split_index -- Index of the split to unlearn from
-    percentage_to_unlearn -- Percentage of data to unlearn (default: 10%)
-    random_seed -- Random seed for reproducibility
     
     Returns:
     model -- The retrained model
@@ -27,24 +25,28 @@ def unlearn_from_split(split_index, percentage_to_unlearn=10, random_seed=42):
     # Load the split data
     X_train, X_val, y_train, y_val = load_split_data(split_index)
     
-    # Set random seed for reproducibility
-    np.random.seed(random_seed)
+    # Load the pre-selected indices to unlearn
+    unlearn_data_path = f"./data/unlearned/unlearn_data_split_{split_index}.npz"
+    if not os.path.exists(unlearn_data_path):
+        print(f"Error: Unlearning data not found at {unlearn_data_path}")
+        print("Please run prepare_unlearning_data.py first")
+        return None, None
+        
+    unlearn_data = np.load(unlearn_data_path)
     
-    # Number of samples to unlearn
-    n_samples = len(X_train)
-    n_unlearn = int(n_samples * percentage_to_unlearn / 100)
+    # Get the mask that identifies which rows to keep
+    keep_mask = unlearn_data['rows_to_keep_mask']
     
-    # Randomly select rows to unlearnž
-    unlearn_indices = np.random.choice(n_samples, n_unlearn, replace=False)
+    # Also get the local indices that were removed (for reference)
+    local_indices_to_unlearn = unlearn_data['local_indices']
+    n_unlearn = len(local_indices_to_unlearn)
     
-    keep_mask = np.ones(n_samples, dtype=bool)
-    keep_mask[unlearn_indices] = False
-    
+    # Filter the data
     X_train_filtered = X_train[keep_mask]
     y_train_filtered = y_train[keep_mask]
     
-    print(f"Original training data: {n_samples} samples")
-    print(f"Unlearning {n_unlearn} samples ({percentage_to_unlearn}%)")
+    print(f"Original training data: {len(X_train)} samples")
+    print(f"Unlearning {n_unlearn} samples ({n_unlearn/len(X_train)*100:.1f}%)")
     print(f"Remaining training data: {len(X_train_filtered)} samples")
     
     # Train a new model on the filtered data
@@ -56,13 +58,11 @@ def unlearn_from_split(split_index, percentage_to_unlearn=10, random_seed=42):
     val_accuracy = accuracy_score(y_val, y_pred_val)
     print(f"Validation accuracy after unlearning: {val_accuracy:.4f}")
     
-    return model, unlearn_indices
+    return model, unlearn_data['original_indices']
 
 def main():
-    parser = argparse.ArgumentParser(description='Unlearn data from a specific split and retrain the model')
-    parser.add_argument('--split-index', type=int, default=0, help='Index of the split to unlearn from (default: 0)')
-    parser.add_argument('--percentage', type=float, default=10, help='Percentage of data to unlearn (default: 10%)')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed (default: 42)')
+    parser = argparse.ArgumentParser(description='Unlearn pre-selected data from a specific split and retrain the model')
+    parser.add_argument('--split-index', type=int, default=3, help='Index of the split to unlearn from (default: 3)')
     args = parser.parse_args()
     
     # Chec if split data exists
@@ -70,7 +70,14 @@ def main():
     if not split_path.exists():
         print(f"Error: Split {args.split_index} not found. Run train_split_models.py first.")
         return
+        
+    # Check if unlearning data exists
+    unlearn_data_path = Path(f"./data/unlearned/unlearn_data_split_{args.split_index}.npz")
+    if not unlearn_data_path.exists():
+        print(f"Error: Unlearning data not found. Run prepare_unlearning_data.py first with --split-index {args.split_index}")
+        return
     
+    # Load the ensemble models
     model_base_name = 'split_ensemble'
     models, scaler, encoders = load_ensemble_models(model_base_name)
     
@@ -80,25 +87,19 @@ def main():
     
     print(f"Loaded {len(models)} ensemble models")
     
-    # Unlearn and retrain the model for the index split
-    updated_model, unlearned_indices = unlearn_from_split(
-        args.split_index, 
-        percentage_to_unlearn=args.percentage,
-        random_seed=args.seed
-    )
+    # Unlearn and retrain the model for the specified split
+    updated_model, unlearned_indices = unlearn_from_split(args.split_index)
     
-    # Replace the old model with new one
+    if updated_model is None:
+        return
+        
+    # Replace the old model with the new one
     models[args.split_index] = updated_model
     
     # Save the updated ensemble models
     model_base_name = 'split_ensemble_unlearned'
     save_ensemble_models(models, model_base_name, scaler, encoders)
     print(f"Updated ensemble saved with base name '{model_base_name}' in the models directory")
-    
-    # Save the unlearned data indices for reference
-    unlearn_dir = Path("./data/unlearned")
-    unlearn_dir.mkdir(parents=True, exist_ok=True)
-    np.save(f"{unlearn_dir}/unlearned_indices_split_{args.split_index}.npy", unlearned_indices)
     
     # Evaluate the updated ensemble on the test data
     test_path = os.path.join('data', 'adult_income', 'adult.test')
